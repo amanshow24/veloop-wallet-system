@@ -1,6 +1,9 @@
 # Dependencies
 node_modules/
 
+# Assignment source document
+Wallet_Backend_Task.pdf
+
 # Environment files
 .env
 .env.*
