@@ -1,0 +1,165 @@
+{
+  "info": {
+    "_postman_id": "450881a5-f86e-4164-8350-8ca6958d1c90",
+    "name": "VELoop Wallet API - Local",
+    "description": "Authenticated wallet reads, admin/internal mutations, and authorization-negative requests for local development. Use only a disposable development database for credit/debit requests.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5000/api" },
+    { "key": "userToken", "value": "" },
+    { "key": "adminToken", "value": "" },
+    { "key": "targetUserId", "value": "" },
+    { "key": "otherUserId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "Authenticated user endpoints",
+      "item": [
+        {
+          "name": "Get wallet",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Authenticated wallet read succeeds', () => pm.response.to.have.status(200));", "pm.test('Response contains all wallet balances', () => { const body = pm.response.json(); pm.expect(body.success).to.eql(true); ['ves', 'sves', 'gems', 'tokens', 'spins'].forEach(key => pm.expect(body.wallet).to.have.property(key)); });"] } }]
+        },
+        {
+          "name": "Get wallet summary",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/summary",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Authenticated wallet summary succeeds', () => pm.response.to.have.status(200));", "pm.test('Summary contains all currencies', () => { const body = pm.response.json(); pm.expect(body.success).to.eql(true); ['ves', 'sves', 'gems', 'tokens', 'spins'].forEach(key => pm.expect(body.summary.balances).to.have.property(key)); });"] } }]
+        },
+        {
+          "name": "Get paginated wallet transactions",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet/transactions?page=1&limit=20",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Authenticated transaction history succeeds', () => pm.response.to.have.status(200));", "pm.test('Response contains transactions and pagination', () => { const body = pm.response.json(); pm.expect(body.success).to.eql(true); pm.expect(body.transactions).to.be.an('array'); pm.expect(body.pagination.page).to.eql(1); pm.expect(body.pagination.limit).to.eql(20); });"] } }]
+        },
+        {
+          "name": "Reject cross-user wallet query",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{baseUrl}}/wallet?userId={{otherUserId}}",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Client cannot select another wallet', () => pm.response.to.have.status(400));", "pm.test('Cross-user query is reported as invalid input', () => pm.expect(pm.response.json().success).to.eql(false));"] } }]
+        },
+        {
+          "name": "Reject user wallet credit",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"targetUserId\":\"{{targetUserId}}\",\"currency\":\"VES\",\"amount\":1,\"type\":\"BONUS\",\"source\":\"POSTMAN_TEST\",\"description\":\"Authorization negative test\"}" },
+            "url": "{{baseUrl}}/wallet/credit",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Normal user cannot credit wallet', () => pm.response.to.have.status(403));"] } }]
+        },
+        {
+          "name": "Reject user wallet debit",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"targetUserId\":\"{{targetUserId}}\",\"currency\":\"VES\",\"amount\":1,\"type\":\"ADMIN_DEBIT\",\"source\":\"POSTMAN_TEST\",\"description\":\"Authorization negative test\"}" },
+            "url": "{{baseUrl}}/wallet/debit",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{userToken}}", "type": "string" }]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Normal user cannot debit wallet', () => pm.response.to.have.status(403));"] } }]
+        }
+      ]
+    },
+    {
+      "name": "Admin or internal mutation endpoints",
+      "item": [
+        {
+          "name": "Credit target wallet",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"targetUserId\":\"{{targetUserId}}\",\"currency\":\"VES\",\"amount\":100,\"type\":\"BONUS\",\"source\":\"POSTMAN_TEST\",\"description\":\"Local admin Postman credit\",\"metadata\":{\"isTest\":true}}" },
+            "url": "{{baseUrl}}/wallet/credit",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{adminToken}}", "type": "string" }]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Admin/internal credit succeeds', () => pm.response.to.have.status(201));", "pm.test('Credit returns ledger snapshots', () => { const body = pm.response.json(); pm.expect(body.success).to.eql(true); pm.expect(body.transaction).to.have.property('balanceBefore'); pm.expect(body.transaction).to.have.property('balanceAfter'); });"] } }]
+        },
+        {
+          "name": "Debit target wallet",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\"targetUserId\":\"{{targetUserId}}\",\"currency\":\"VES\",\"amount\":50,\"type\":\"ADMIN_DEBIT\",\"source\":\"POSTMAN_TEST\",\"description\":\"Local admin Postman debit\",\"metadata\":{\"isTest\":true}}" },
+            "url": "{{baseUrl}}/wallet/debit",
+            "auth": {
+              "type": "bearer",
+              "bearer": [{ "key": "token", "value": "{{adminToken}}", "type": "string" }]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Admin/internal debit succeeds when balance is sufficient', () => pm.response.to.have.status(201));", "pm.test('Debit returns ledger snapshots', () => { const body = pm.response.json(); pm.expect(body.success).to.eql(true); pm.expect(body.transaction).to.have.property('balanceBefore'); pm.expect(body.transaction).to.have.property('balanceAfter'); });"] } }]
+        }
+      ]
+    },
+    {
+      "name": "Unauthenticated requests",
+      "item": [
+        {
+          "name": "Unauthorized get wallet",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/wallet", "auth": { "type": "noauth" } },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Missing auth returns 401', () => pm.response.to.have.status(401));"] } }]
+        },
+        {
+          "name": "Unauthorized get wallet summary",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/wallet/summary", "auth": { "type": "noauth" } },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Missing auth returns 401', () => pm.response.to.have.status(401));"] } }]
+        },
+        {
+          "name": "Unauthorized get transactions",
+          "request": { "method": "GET", "header": [], "url": "{{baseUrl}}/wallet/transactions?page=1&limit=20", "auth": { "type": "noauth" } },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Missing auth returns 401', () => pm.response.to.have.status(401));"] } }]
+        },
+        {
+          "name": "Unauthorized wallet credit",
+          "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{}" }, "url": "{{baseUrl}}/wallet/credit", "auth": { "type": "noauth" } },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Missing auth returns 401', () => pm.response.to.have.status(401));"] } }]
+        },
+        {
+          "name": "Unauthorized wallet debit",
+          "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{}" }, "url": "{{baseUrl}}/wallet/debit", "auth": { "type": "noauth" } },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.test('Missing auth returns 401', () => pm.response.to.have.status(401));"] } }]
+        }
+      ]
+    }
+  ]
+}

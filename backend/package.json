@@ -1,0 +1,31 @@
+{
+  "name": "veloop-wallet-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Express API scaffold for the VELoop Rewards wallet assignment",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "nodemon src/server.js",
+    "test": "node --test",
+    "test:auth:integration": "node --test tests/auth.mongo.test.js",
+    "test:payout:integration": "node --test tests/payout.mongo.test.js",
+    "test:wallet:integration": "node --test tests/walletService.mongo.test.js",
+    "test:withdrawal:integration": "node --test tests/withdrawal.mongo.test.js",
+    "seed:demo": "node seed/demo.js",
+    "seed:payout:reference": "node seed/payoutReference.js"
+  },
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-rate-limit": "^8.7.2",
+    "helmet": "^8.0.0",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.9.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
+  }
+}
