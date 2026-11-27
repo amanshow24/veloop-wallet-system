@@ -1,48 +1,69 @@
-# API Documentation
+# VELoop Wallet API
+
+> **Demo API:** This project is not connected to VELoop production systems or
+> a payment provider. Payout reference amounts are not live offers. Use
+> synthetic account and payout details only.
+
+| | |
+|---|---|
+| **Base path** | `/api` |
+| **Transport** | JSON over HTTP; use HTTPS in hosted environments |
+| **Authentication** | JWT bearer token for protected routes |
+| **Wallet amounts** | Balances are nonnegative safe integers; requested mutation amounts are positive safe integers |
+| **Wallet currencies** | `VES`, `SVES`, `GEMS`, `TOKENS`, `SPINS` |
 
 ## Contents
 
+- [Endpoint index](#endpoint-index)
 - [Authentication](#authentication)
-  - [Register](#register)
-  - [Login](#login)
-  - [Current user](#current-user)
-- [Wallet API](#wallet-api)
-  - [Get wallet](#get-wallet)
-  - [Get wallet summary](#get-wallet-summary)
-  - [Get wallet transactions](#get-wallet-transactions)
-  - [Internal/admin credit](#internaladmin-credit)
-  - [Internal/admin debit](#internaladmin-debit)
+- [Wallet](#wallet)
+- [Payout configuration](#payout-configuration)
 - [Withdrawals](#withdrawals)
-  - [Create a withdrawal](#create-a-withdrawal)
-  - [List the authenticated user's withdrawals](#list-the-authenticated-users-withdrawals)
-  - [Get one of the authenticated user's withdrawals](#get-one-of-the-authenticated-users-withdrawals)
-  - [Admin/internal review operations](#admininternal-review-operations)
-  - [Withdrawal safety and test mode](#withdrawal-safety-and-test-mode)
-- [Payout configuration API](#payout-configuration-api)
-  - [Get payout methods](#get-payout-methods)
-  - [Get payout options](#get-payout-options)
-  - [Assignment reference payout configuration](#assignment-reference-payout-configuration)
-- [Testing wallet endpoints in Postman](#testing-wallet-endpoints-in-postman)
-- [Health check](#health-check)
-- [Testing and deployment notes](#testing-and-deployment-notes)
+- [Health and readiness](#health-and-readiness)
+- [Errors and rate limits](#errors-and-rate-limits)
+- [Local testing](#local-testing)
+
+## Endpoint index
+
+| Method | Endpoint | Access | Purpose |
+|---|---|---|---|
+| `POST` | `/api/auth/register` | Public | Create a `USER` account and zero-balance wallet |
+| `POST` | `/api/auth/login` | Public | Authenticate and issue a token |
+| `GET` | `/api/auth/me` | Active account | Return the authenticated profile |
+| `GET` | `/api/wallet` | Active account | Read the caller’s balances |
+| `GET` | `/api/wallet/summary` | Active account | Read balances and last-updated time |
+| `GET` | `/api/wallet/transactions` | Active account | List the caller’s paginated ledger |
+| `POST` | `/api/wallet/credit` | `ADMIN`, `INTERNAL` | Credit a target wallet |
+| `POST` | `/api/wallet/debit` | `ADMIN`, `INTERNAL` | Debit a target wallet |
+| `GET` | `/api/payout/methods` | Active account | Read payout catalog and nested options |
+| `GET` | `/api/payout/options` | Active account | Read configured payout options |
+| `POST` | `/api/withdrawals` | Active account | Submit an idempotent withdrawal request |
+| `GET` | `/api/withdrawals` | Active account | List the caller’s withdrawal requests |
+| `GET` | `/api/withdrawals/:withdrawalId` | Active account | Read one of the caller’s requests |
+| `PATCH` | `/api/withdrawals/:withdrawalId/process` | `ADMIN`, `INTERNAL` | Move `PENDING` to `PROCESSING` |
+| `PATCH` | `/api/withdrawals/:withdrawalId/approve` | `ADMIN`, `INTERNAL` | Move `PROCESSING` to `APPROVED` |
+| `PATCH` | `/api/withdrawals/:withdrawalId/reject` | `ADMIN`, `INTERNAL` | Reject and reverse a pending/processing debit |
+| `GET` | `/api/health` | Public | Liveness check |
+| `GET` | `/api/ready` | Public | MongoDB readiness check |
+
+Protected routes require:
+
+```http
+Authorization: Bearer <token>
+```
+
+Identity and role are loaded from the account represented by the verified
+token. User-scoped reads do not accept a client-selected `userId`.
 
 ## Authentication
 
-Authentication routes are rate-limited to 10 requests per IP per 15-minute
-window. Requests and responses use JSON. Passwords and account role/status
-must never be supplied by clients except the password used to authenticate.
-The API uses `express-rate-limit`'s built-in in-memory store; Redis or an
-Upstash API key is not required for one API instance. Counters are per-process,
-reset when the process restarts, and are not shared across instances. Configure
-`TRUST_PROXY_HOPS` for the actual trusted proxy chain so the limiter can
-identify the client IP correctly.
+All authentication routes share a limit of 10 requests per IP per 15 minutes.
+Tokens are signed by the API and expire according to `JWT_EXPIRES_IN` (default
+`1h`). Suspended accounts cannot use protected routes.
 
 ### Register
 
-- **Method:** `POST`
-- **Path:** `/api/auth/register`
-- **Authentication:** Not required
-- **Request:**
+`POST /api/auth/register`
 
 ```json
 {
@@ -52,15 +73,13 @@ identify the client IP correctly.
 }
 ```
 
-- **Response (201):** Returns `success`, a safe user object, and a JWT token.
-  The new user is always assigned the `USER` role and `ACTIVE` status. The
-  backend creates exactly one wallet with zero balances in the same MongoDB
-  transaction; registration therefore requires a replica-set or sharded
-  MongoDB deployment.
-- **Errors:** `400` invalid input or extra fields; `409` email already exists;
-  `429` rate limit exceeded.
+| Field | Constraints |
+|---|---|
+| `name` | String, 2–80 characters after trimming |
+| `email` | Valid email, maximum 254 characters |
+| `password` | 8–72 UTF-8 bytes |
 
-Example success response:
+**201 Created**
 
 ```json
 {
@@ -76,12 +95,13 @@ Example success response:
 }
 ```
 
+Registration creates a `USER` account and one zero-balance wallet in the same
+MongoDB transaction. Clients cannot select roles or account status. MongoDB
+transactions require a replica set or sharded cluster.
+
 ### Login
 
-- **Method:** `POST`
-- **Path:** `/api/auth/login`
-- **Authentication:** Not required
-- **Request:**
+`POST /api/auth/login`
 
 ```json
 {
@@ -90,101 +110,42 @@ Example success response:
 }
 ```
 
-- **Response (200):** Returns `success`, a safe user object, and a JWT token.
-- **Errors:** `400` invalid input; `401` invalid credentials; `403` inactive
-  account; `429` rate limit exceeded. Invalid email and password use the same
-  response to avoid exposing account existence.
+Returns the same `user` and `token` shape with **200 OK**. Invalid email and
+password combinations share the same **401** response so the API does not
+reveal whether an account exists. Inactive accounts receive **403**.
 
 ### Current user
 
-- **Method:** `GET`
-- **Path:** `/api/auth/me`
-- **Authentication:** Required; send the JWT returned by register or login in
-  an `Authorization` header containing the access token.
-- **Response (200):** Returns the authenticated user's safe profile.
-- **Errors:** `401` missing, invalid, expired, or unknown-user token; `403`
-  inactive account; `429` rate limit exceeded.
+`GET /api/auth/me`
 
-Protected identity and role are loaded from the account identified by the
-verified JWT subject. A `userId` query or body field is never used to select
-the current account. The `authorizeRoles(...roles)` middleware is available
-for internal/admin routes.
+Returns **200 OK** with `{ "success": true, "user": { ... } }`. The user object
+contains only `id`, `name`, `email`, `accountStatus`, and `role`.
 
-## Wallet API
+## Wallet
 
-All wallet endpoints require an `Authorization` header containing the JWT
-access token. The read endpoints always use the user ID from the verified
-token; they reject a client-supplied `userId` rather than allowing a caller
-to select another user's wallet. All responses use JSON and include a
-`success` boolean.
+Wallet balances are nonnegative safe integers. Currency fields in the wallet
+representation are lowercase; transaction `currency` values are uppercase.
+Ledger entries are append-only.
 
-### Get wallet
+### Read wallet
 
-- **Method:** `GET`
-- **Path:** `/api/wallet`
-- **Authorization:** Active authenticated user; returns only that user's
-  wallet.
-- **Query:** None.
-- **Response (200):**
+| Request | Response |
+|---|---|
+| `GET /api/wallet` | `200 { "success": true, "wallet": { "id", "ves", "sves", "gems", "tokens", "spins", "createdAt", "updatedAt" } }` |
+| `GET /api/wallet/summary` | `200 { "success": true, "summary": { "balances": { ... }, "lastUpdated": "ISO-8601" } }` |
 
-```json
-{
-  "success": true,
-  "wallet": {
-    "id": "WALLET_OBJECT_ID",
-    "ves": 25000,
-    "sves": 5000,
-    "gems": 100,
-    "tokens": 500,
-    "spins": 3,
-    "createdAt": "2026-01-01T00:00:00.000Z",
-    "updatedAt": "2026-02-01T00:00:00.000Z"
-  }
-}
-```
+These endpoints take no query parameters. Wallet not found returns **404**.
 
-- **Errors:** `401` missing/invalid token; `403` inactive account; `404`
-  authenticated user's wallet does not exist; `400` unsupported query
-  parameters.
+### List transactions
 
-### Get wallet summary
+`GET /api/wallet/transactions?page=1&limit=20`
 
-- **Method:** `GET`
-- **Path:** `/api/wallet/summary`
-- **Authorization:** Active authenticated user; only that user's wallet is
-  summarized.
-- **Query:** None.
-- **Response (200):**
+| Query | Default | Constraints |
+|---|---:|---|
+| `page` | `1` | Positive integer, maximum `1,000,000` |
+| `limit` | `20` | Positive integer, maximum `100` |
 
-```json
-{
-  "success": true,
-  "summary": {
-    "balances": {
-      "ves": 25000,
-      "sves": 5000,
-      "gems": 100,
-      "tokens": 500,
-      "spins": 3
-    },
-    "lastUpdated": "2026-02-01T00:00:00.000Z"
-  }
-}
-```
-
-- **Errors:** Same as `GET /api/wallet`.
-
-### Get wallet transactions
-
-- **Method:** `GET`
-- **Path:** `/api/wallet/transactions`
-- **Authorization:** Active authenticated user; history is scoped to the JWT
-  subject.
-- **Query:** Optional `page` (positive integer, default `1`) and `limit`
-  (positive integer, default `20`, maximum `100`). Other query parameters,
-  including `userId`, are rejected.
-- **Example:** `GET /api/wallet/transactions?page=1&limit=20`
-- **Response (200):**
+Other query parameters are rejected. The result is newest-first:
 
 ```json
 {
@@ -205,28 +166,15 @@ to select another user's wallet. All responses use JSON and include a
       "createdAt": "2026-02-01T00:00:00.000Z"
     }
   ],
-  "pagination": {
-    "page": 1,
-    "limit": 20,
-    "total": 1,
-    "pages": 1
-  }
+  "pagination": { "page": 1, "limit": 20, "total": 1, "pages": 1 }
 }
 ```
 
-- **Errors:** `400` invalid or unsupported query parameter; `401` missing or
-  invalid token; `403` inactive account.
+### Privileged credit and debit
 
-### Internal/admin credit
-
-- **Method:** `POST`
-- **Path:** `/api/wallet/credit`
-- **Authorization:** Active `ADMIN` or `INTERNAL` account only.
-- **Request:** `targetUserId` is the wallet being administered, not the
-  authenticated caller's identity. It is accepted only on this privileged
-  route; reads always use the authenticated user. Never send or accept
-  `balanceBefore` or `balanceAfter` from clients—the service computes those
-  values from the stored wallet.
+`POST /api/wallet/credit` and `POST /api/wallet/debit` require an active
+`ADMIN` or `INTERNAL` account. The body must contain only the fields below;
+`targetUserId` identifies the wallet being administered.
 
 ```json
 {
@@ -237,212 +185,188 @@ to select another user's wallet. All responses use JSON and include a
   "source": "ADMIN",
   "referenceId": "support-case-123",
   "description": "Approved demo bonus",
-  "metadata": {
-    "reason": "local test"
-  }
+  "metadata": { "reason": "local test" }
 }
 ```
 
-- **Response (201):** Returns `success`, updated wallet balances, and the
-  append-only ledger transaction with computed `balanceBefore` and
-  `balanceAfter`.
-- **Errors:** `400` invalid fields, currency, amount, or credit type; `401`
-  missing/invalid token; `403` non-admin/internal caller; `404` target wallet
-  missing; `409` balance integer range exceeded. Internal errors return a
-  generic `500` message.
+| Field | Constraints |
+|---|---|
+| `targetUserId` | MongoDB ObjectId |
+| `currency` | `VES`, `SVES`, `GEMS`, `TOKENS`, or `SPINS` |
+| `amount` | Positive safe integer |
+| `type` | Must match the operation’s permitted types |
+| `source` | Non-empty string, maximum 64 characters |
+| `referenceId` | Optional string, maximum 128 characters |
+| `description` | Non-empty string, maximum 300 characters |
+| `metadata` | Optional plain JSON object |
 
-Every successful wallet credit and debit also creates a corresponding audit
-record in the same MongoDB transaction as the wallet update and ledger entry.
-The audit record identifies the authenticated administrator, wallet, ledger
-transaction, currency, amount, source, and request IP. Internal operations
-without a user actor record `SYSTEM`; audit metadata never stores payout
-details.
+Credit types: `CREDIT`, `REWARD`, `BONUS`, `REFERRAL`, `DAILY_REWARD`,
+`AD_REWARD`, `GAME_REWARD`, `ADMIN_CREDIT`, `EXCHANGE_CREDIT`.
 
-Example success response:
+Debit types: `DEBIT`, `WITHDRAWAL`, `EXCHANGE_DEBIT`, `ADMIN_DEBIT`,
+`CORRECTION`.
 
-```json
-{
-  "success": true,
-  "wallet": {
-    "id": "WALLET_OBJECT_ID",
-    "ves": 25500,
-    "sves": 5000,
-    "gems": 100,
-    "tokens": 500,
-    "spins": 3,
-    "createdAt": "2026-01-01T00:00:00.000Z",
-    "updatedAt": "2026-02-01T00:00:00.000Z"
-  },
-  "transaction": {
-    "transactionId": "TRANSACTION_ID",
-    "userId": "TARGET_USER_OBJECT_ID",
-    "currency": "VES",
-    "type": "BONUS",
-    "amount": 500,
-    "balanceBefore": 25000,
-    "balanceAfter": 25500,
-    "source": "ADMIN",
-    "referenceId": "support-case-123",
-    "status": "COMPLETED",
-    "description": "Approved demo bonus",
-    "metadata": {
-      "reason": "local test"
-    },
-    "createdAt": "2026-02-01T00:00:00.000Z",
-    "updatedAt": "2026-02-01T00:00:00.000Z"
-  }
-}
+**201 Created** returns `success`, the updated `wallet`, and the created
+`transaction`. `balanceBefore` and `balanceAfter` are computed by the server;
+clients must not submit them. Wallet changes, ledger insertion, and audit
+record creation are committed together. Insufficient funds return **409**.
+
+## Payout configuration
+
+Both catalog endpoints require an active authenticated account. Payout data
+comes from MongoDB; clients should render the response rather than hardcode
+methods, availability, or denominations. An option is selectable only when
+`active` is `true` and `availability` is `AVAILABLE`. Withdrawal submission
+revalidates configuration and eligibility on the server.
+
+### List methods
+
+`GET /api/payout/methods`
+
+Returns **200 OK** with `{ "success": true, "methods": [...] }`. Each method
+includes its `methodId`, `name`, `type`, `active`, `availability`,
+`eligibility`, `requiredDetails`, and nested `options`. Disabled methods remain
+in the response so the client can show their availability state.
+
+### List options
+
+`GET /api/payout/options`
+
+Optionally filter by method:
+
+```http
+GET /api/payout/options?method=upi
 ```
 
-### Internal/admin debit
+Returns **200 OK** with `{ "success": true, "options": [...] }`. A valid but
+unknown method returns **404**; malformed or unexpected query fields return
+**400**. Disabled options are included in the catalog.
 
-- **Method:** `POST`
-- **Path:** `/api/wallet/debit`
-- **Authorization:** Active `ADMIN` or `INTERNAL` account only.
-- **Request:** Same fields and validation as credit. Supported debit examples
-  include `WITHDRAWAL`, `EXCHANGE_DEBIT`, `ADMIN_DEBIT`, and `CORRECTION`.
-- **Response (201):** Returns the updated wallet and append-only ledger
-  transaction with server-computed balances.
-- **Errors:** Same authorization and input errors as credit; `409` when the
-  target wallet has insufficient funds. The wallet update and ledger insert
-  are committed together in a MongoDB transaction.
+Option records include the method/option IDs, `currency`, `requiredAmount`,
+`payoutAmount`, `payoutCurrency`, availability, eligibility, required detail
+fields, and metadata.
 
-The success response has the same `success`, `wallet`, and `transaction`
-shape as the credit response, with the debit's resulting balances and ledger
-type.
+### Assignment reference data
+
+The opt-in development seed configures the following UPI values. They are
+assignment references only and require manual review; they are not verified
+live rates or executable payouts.
+
+| Sample payout | Required wallet amount |
+|---:|---:|
+| INR 10 | 2,400 VES |
+| INR 25 | 5,800 VES |
+| INR 50 | 10,000 VES |
+| INR 100 | 19,500 VES |
+| INR 150 | 28,500 VES |
+| INR 300 | 52,500 VES |
+| INR 500 | 80,500 VES |
+| INR 1,000 | 150,000 VES |
+
+The seed leaves PayPal, Amazon Gift Card, and Google Play Gift Card
+unavailable. It must not be run in production.
 
 ## Withdrawals
 
-Withdrawal requests are authenticated and scoped to the JWT user. They use
-immediate VEs deduction: the withdrawal, wallet update, debit ledger entry,
-and audit log are committed in one MongoDB transaction. If an administrator
-rejects the request, an append-only reversal credit and the status/audit
-updates are committed together. A rejection cannot be applied twice.
-
-The payout method and option must both exist in MongoDB, be active, and have
-`AVAILABLE` status. Account eligibility and required payout detail fields are
-checked from that configuration. Payout amounts and required wallet currency
-are always loaded from the selected database option; client-supplied amounts
-or balances are rejected. The opt-in assignment-reference seed enables UPI
-with sample denominations and mandatory manual review. These values are not
-verified live offers, and the project does not connect to a payout provider.
-Do not use the assignment-reference seed in production.
+Withdrawal amounts and wallet currency are read from the selected database
+option; the request cannot set them. Creating a request atomically writes the
+withdrawal, debits the wallet, appends a ledger entry, and records an audit
+entry. No funds are transferred to an external provider.
 
 ### Create a withdrawal
 
-- **Method:** `POST`
-- **Path:** `/api/withdrawals` (the trailing-slash form is also accepted)
-- **Authorization:** Active authenticated user.
-- **Rate limit:** 5 requests per IP per 15 minutes.
-- **Required header:** `Idempotency-Key`, 8-128 characters using letters,
-  digits, `.`, `_`, `:`, or `-`. Reuse the same key when retrying one logical
-  submission.
-- **Request:** Only `method`, `optionId`, and `payoutDetails` are accepted.
-  Supply the required detail keys returned by the configured method/option;
-  for UPI the reference configuration uses `upiId`.
+`POST /api/withdrawals`
+
+Limited to 5 requests per client IP per 15 minutes. Include an `Idempotency-Key`
+header of 8–128 characters using letters, digits, `.`, `_`, `:`, or `-`.
+Reuse the same key when retrying the same logical request.
+
+```http
+Idempotency-Key: demo-withdrawal-001
+Content-Type: application/json
+```
 
 ```json
 {
   "method": "upi",
-  "optionId": "upi_inr_10",
+  "optionId": "upi_inr_10_reference",
   "payoutDetails": {
     "upiId": "demo@upi"
   }
 }
 ```
 
-- **Response (201):** New pending withdrawal. The returned `currencyAmount`,
-  `payoutAmount`, and `payoutCurrency` come from the database configuration.
-- **Idempotent replay (200):** The same user, key, and payload return the
-  original withdrawal without another deduction. Reusing the key with a
-  different method, option, or payout details returns `409`.
-- **Errors:** `400` invalid input/missing idempotency header; `401`
-  unauthenticated; `403` inactive or ineligible account; `409` unavailable
-  method/option, insufficient funds, or idempotency payload conflict; `429`
-  rate limit exceeded.
+Only `method`, `optionId`, and `payoutDetails` are accepted. Details must
+contain exactly the configured required fields, with non-empty string values.
+For a `upiId` field, the API validates UPI ID syntax. Use synthetic values
+only; payout details are stored with the withdrawal and included in its API
+representation.
 
-Example success response:
+| Outcome | HTTP status | Behavior |
+|---|---:|---|
+| New request | `201` | Creates a `PENDING` withdrawal and performs one wallet debit |
+| Same user, key, and payload | `200` | Returns the original withdrawal without another debit |
+| Same key with a different payload | `409` | Rejects the conflicting request |
 
-```json
-{
-  "success": true,
-  "replayed": false,
-  "withdrawal": {
-    "withdrawalId": "WITHDRAWAL_UUID",
-    "userId": "AUTHENTICATED_USER_OBJECT_ID",
-    "method": "upi",
-    "optionId": "upi_inr_10",
-    "currency": "VES",
-    "currencyAmount": 2400,
-    "payoutAmount": 10,
-    "payoutCurrency": "INR",
-    "payoutDetails": {
-      "upiId": "demo@upi"
-    },
-    "status": "PENDING",
-    "rejectionReason": null,
-    "reviewNote": null,
-    "transactionId": "DEBIT_LEDGER_TRANSACTION_ID",
-    "requestedAt": "2026-02-01T00:00:00.000Z",
-    "processedAt": null,
-    "processedBy": null,
-    "statusHistory": [
-      {
-        "status": "PENDING",
-        "changedBy": "AUTHENTICATED_USER_OBJECT_ID",
-        "note": null,
-        "changedAt": "2026-02-01T00:00:00.000Z"
-      }
-    ]
-  }
-}
-```
+The response contains `success`, `replayed`, and `withdrawal`. The withdrawal
+includes the configured currency amounts, payout details, status, linked
+transaction ID, request/review timestamps, and status history.
 
-### List the authenticated user's withdrawals
+Other common errors: **400** invalid body/header/details; **401** missing or
+invalid token; **403** inactive or ineligible account; **404** wallet missing;
+**409** unavailable method/option, insufficient balance, or idempotency
+conflict; **429** rate limit reached.
 
-- **Method:** `GET`
-- **Path:** `/api/withdrawals` or `/api/withdrawals/`
-- **Authorization:** Active authenticated user; results are always scoped to
-  the JWT subject. `userId` is not accepted as a query parameter.
-- **Query:** Optional `page` (positive integer, default `1`), `limit` (positive
-  integer, default `20`, maximum `100`), and `status` (`PENDING`,
-  `PROCESSING`, `APPROVED`, `REJECTED`, or `CANCELLED`).
-- **Response (200):** `{ "success": true, "withdrawals": [], "pagination": {} }`.
+### List and retrieve withdrawals
 
-### Get one of the authenticated user's withdrawals
+| Request | Description |
+|---|---|
+| `GET /api/withdrawals` | List only the caller’s withdrawals |
+| `GET /api/withdrawals/:withdrawalId` | Retrieve one of the caller’s withdrawals |
 
-- **Method:** `GET`
-- **Path:** `/api/withdrawals/:withdrawalId`
-- **Authorization:** Active authenticated user; another user's ID returns the
-  same `404` as an unknown withdrawal.
-- **Response (200):** `{ "success": true, "withdrawal": { ... } }`.
+List query parameters:
 
-### Admin/internal review operations
+| Query | Default | Constraints |
+|---|---:|---|
+| `page` | `1` | Positive integer, maximum `1,000,000` |
+| `limit` | `20` | Positive integer, maximum `100` |
+| `status` | — | `PENDING`, `PROCESSING`, `APPROVED`, `REJECTED`, or `CANCELLED` |
 
-All review operations require an active `ADMIN` or `INTERNAL` account and
-are rate-limited to 30 requests per IP per 15 minutes. A transition and its
-audit record are atomic. Terminal withdrawals cannot be changed.
+Unknown query parameters are rejected. A request belonging to another user is
+reported as **404**, the same as an unknown withdrawal ID.
 
-| Method | Path | Allowed transition | Request body |
-|---|---|---|---|
-| `PATCH` | `/api/withdrawals/:withdrawalId/process` | `PENDING` → `PROCESSING` | `{}` or `{"reviewNote":"..."}` |
-| `PATCH` | `/api/withdrawals/:withdrawalId/approve` | `PROCESSING` → `APPROVED` | `{}` or `{"reviewNote":"..."}` |
-| `PATCH` | `/api/withdrawals/:withdrawalId/reject` | `PENDING`/`PROCESSING` → `REJECTED` | `{"reason":"..."}` |
+### Review a withdrawal
 
-Rejecting a withdrawal credits the exact originally deducted currency amount
-back to the user's wallet and appends a `WITHDRAWAL_REVERSAL` ledger entry.
-The original debit remains unchanged. Rejection requires a reason; the reason
-and transition are included in audit/status history. `CANCELLED` is a
-supported stored status but has no public cancellation endpoint.
+Review actions require an active `ADMIN` or `INTERNAL` account and share a
+limit of 30 requests per client IP per 15 minutes.
 
-### Withdrawal safety and test mode
+| Request | Allowed transition | Body |
+|---|---|---|
+| `PATCH /api/withdrawals/:withdrawalId/process` | `PENDING` → `PROCESSING` | `{}` or `{"reviewNote":"..."}` |
+| `PATCH /api/withdrawals/:withdrawalId/approve` | `PROCESSING` → `APPROVED` | `{}` or `{"reviewNote":"..."}` |
+| `PATCH /api/withdrawals/:withdrawalId/reject` | `PENDING` or `PROCESSING` → `REJECTED` | `{"reason":"..."}` |
 
-MongoDB transactions require a replica set (Atlas supports this). To run the
-withdrawal integration test, set `WITHDRAWAL_TEST_MONGO_URI` to an isolated
-local replica-set test database and run `npm run test:withdrawal:integration`
-from `backend`. Never point this destructive test at a production database.
+`reviewNote`, when provided, must be 3–1,000 characters. Rejection requires a
+3–1,000-character `reason`. A rejection credits the original wallet amount
+back through a new `WITHDRAWAL_REVERSAL` ledger entry; the original debit
+remains unchanged. The status transition, reversal, and audit record commit
+atomically. Invalid transitions return **409**. Approval only records the
+review status; it does not transfer funds. `CANCELLED` is a stored status but
+has no public cancellation endpoint.
 
-All errors use this response shape:
+## Health and readiness
+
+| Request | Meaning | Success response |
+|---|---|---|
+| `GET /api/health` | API process is responding; does not depend on MongoDB | `200 { "success": true, "service": "veloop-wallet-backend", "status": "ok", "timestamp": "..." }` |
+| `GET /api/ready` | MongoDB connection is ready | `200` with `"status": "ready"`; `503` with `"status": "unavailable"` otherwise |
+
+Both endpoints are public. `/api/ready` is configured as the Render health
+check path.
+
+## Errors and rate limits
+
+Application errors use this JSON shape:
 
 ```json
 {
@@ -451,185 +375,54 @@ All errors use this response shape:
 }
 ```
 
-Credit types include `CREDIT`, `REWARD`, `BONUS`, `REFERRAL`, `DAILY_REWARD`,
-`AD_REWARD`, `GAME_REWARD`, `ADMIN_CREDIT`, and `EXCHANGE_CREDIT`. Debit types
-include `DEBIT`, `WITHDRAWAL`, `EXCHANGE_DEBIT`, `ADMIN_DEBIT`, and
-`CORRECTION`. Amounts must be positive safe integers.
+| Status | Meaning |
+|---:|---|
+| `400` | Invalid JSON, field, query, or other request input |
+| `401` | Missing, invalid, expired, or unknown-user token |
+| `403` | Inactive account or insufficient role/eligibility |
+| `404` | Unknown route or resource not visible to the caller |
+| `409` | Conflict, duplicate account, unavailable option, insufficient funds, or invalid state transition |
+| `413` | Request body exceeds the 32 KB limit |
+| `429` | Rate limit reached |
+| `500` | Unexpected server error; response does not expose internal details |
+| `503` | Readiness probe cannot reach MongoDB |
 
-## Payout configuration API
+| Route group | Limit | Window |
+|---|---:|---:|
+| `/api/auth/*` | 10 requests / IP | 15 minutes |
+| `POST /api/withdrawals` | 5 requests / IP | 15 minutes |
+| Withdrawal review actions | 30 requests / IP | 15 minutes |
 
-Payout methods and options are read from MongoDB (`PayoutMethod` and
-`PayoutOption` collections). Both endpoints require an active authenticated
-user. Responses include method/option availability and eligibility metadata;
-the frontend must respect those states and must not hardcode payout
-denominations. `active` and `availability` are both reported: a method or
-option is selectable only when `active` is `true` and `availability` is
-`AVAILABLE`. The backend still performs authoritative validation when a
-withdrawal request is created.
+Rate limiting uses the built-in in-memory store. Counters reset when the
+process restarts and are not shared across instances. For proxied deployments,
+configure `TRUST_PROXY_HOPS` to the actual trusted proxy chain; do not trust
+arbitrary forwarded headers.
 
-### Get payout methods
+## Local testing
 
-- **Method:** `GET`
-- **Path:** `/api/payout/methods`
-- **Authentication:** Required; active account.
-- **Query:** None.
-- **Response (200):** Returns catalog entries stored in MongoDB, including
-  their configured options. Inactive methods remain present so the UI can
-  explain that a method is not currently available.
+Run the backend unit/HTTP suite from `backend/`:
 
-```json
-{
-  "success": true,
-  "methods": [
-    {
-      "methodId": "upi",
-      "name": "UPI",
-      "type": "UPI",
-      "active": true,
-      "availability": "AVAILABLE",
-      "eligibility": {
-        "accountStatus": "ACTIVE",
-        "configurationConfirmed": true,
-        "manualReviewRequired": true
-      },
-      "requiredDetails": ["upiId"],
-      "options": [
-        {
-          "optionId": "upi_inr_10_reference",
-          "name": "INR 10 UPI redemption (assignment reference)",
-          "currency": "VES",
-          "requiredAmount": 2400,
-          "payoutAmount": 10,
-          "payoutCurrency": "INR",
-          "active": true,
-          "availability": "AVAILABLE",
-          "metadata": {
-            "source": "ASSIGNMENT_REFERENCE",
-            "referenceOnly": true
-          }
-        }
-      ]
-    }
-  ]
-}
+```powershell
+npm test
 ```
 
-- **Errors:** `400` unsupported query parameters; `401` missing/invalid token;
-  `403` inactive account; generic `500` for internal errors.
+Run API checks with the included collection:
 
-### Get payout options
+1. Import [`backend/postman/VELoop-Wallet-Local.postman_collection.json`](./backend/postman/VELoop-Wallet-Local.postman_collection.json).
+2. Set `baseUrl`, `userToken`, `adminToken`, `targetUserId`, and `otherUserId`.
+3. Public signup creates a `USER`; obtain administrator credentials only
+   through trusted local database administration.
+4. Use a disposable development database. Credit/debit calls mutate balances,
+   and the test suite includes cross-user access checks.
 
-- **Method:** `GET`
-- **Path:** `/api/payout/options/`
-- **Authentication:** Required; active account.
-- **Query:** Optional `method`, e.g. `?method=upi`. Without it, returns
-  configured options for all methods. Unknown query parameters or malformed
-  method IDs are rejected.
-- **Response (200):** `{ "success": true, "options": [...] }`, where each
-  option includes its method ID, payout/required amounts, currencies,
-  availability, eligibility, and required detail fields.
-- **Errors:** `400` invalid query; `401` missing/invalid token; `403` inactive
-  account; `404` valid but unknown method; generic `500` for internal errors.
+MongoDB integration test scripts are opt-in and may create or modify records.
+Set the corresponding variable to a dedicated disposable replica-set URI:
 
-The options route returns configured records, including disabled ones, so the
-frontend can display their current availability. The Payout page filters by
-`active` and `availability`, and shows the required VEs cost from each active
-option. To show a method, the
-frontend can call `GET /api/payout/methods` and render the returned catalog.
-After a method is selected, it can call
-`GET /api/payout/options/?method=upi` to refresh that method's options. The
-React app should render the response; payout configuration and denominations
-come from MongoDB.
+| Script | URI variable |
+|---|---|
+| `npm run test:auth:integration` | `AUTH_TEST_MONGO_URI` |
+| `npm run test:payout:integration` | `PAYOUT_TEST_MONGO_URI` |
+| `npm run test:wallet:integration` | `WALLET_TEST_MONGO_URI` |
+| `npm run test:withdrawal:integration` | `WITHDRAWAL_TEST_MONGO_URI` |
 
-### Assignment reference payout configuration
-
-The assignment PDF lists these previously configured UPI reference values:
-
-| Payout | Required balance |
-|---:|---:|
-| INR 10 | 2,400 VEs |
-| INR 25 | 5,800 VEs |
-| INR 50 | 10,000 VEs |
-| INR 100 | 19,500 VEs |
-| INR 150 | 28,500 VEs |
-| INR 300 | 52,500 VEs |
-| INR 500 | 80,500 VEs |
-| INR 1,000 | 150,000 VEs |
-
-The development/test seed makes these eight UPI options active and available
-for the assignment demonstration, marks them `ASSIGNMENT_REFERENCE`, and
-requires manual review. This does not claim that they are the current live
-platform values and does not connect a payment service. PayPal, Amazon Gift
-Card, and Google Play Gift Card remain inactive/unavailable because the
-assignment does not provide their denominations or complete eligibility/detail
-configuration.
-
-The seed requires explicit opt-in and a MongoDB database name ending in `_dev`,
-`_development`, or `_test`. `PAYOUT_REFERENCE_DATABASE` can pin it to an exact
-database name. It is idempotent and refreshes only the four assignment method
-records and eight UPI reference option records; it does not touch users,
-wallets, or ledger transactions. Configuration changes create
-`PAYOUT_CONFIGURATION_CHANGED` audit entries in the same database transaction.
-To verify both endpoints against a dedicated
-disposable database ending in `_test`, set `PAYOUT_TEST_MONGO_URI` and run
-`npm run test:payout:integration`.
-
-### Testing wallet endpoints in Postman
-
-Import `backend/postman/VELoop-Wallet-Local.postman_collection.json`. Set
-`baseUrl`, `userToken`, `adminToken`, `targetUserId`, and `otherUserId` as
-collection variables. Obtain user/admin JWTs from the auth endpoints; public
-registration creates only a `USER`, so an administrator must be provisioned
-through trusted local database administration. The collection includes each
-endpoint, missing-token checks, a cross-user read attempt, and normal-user
-mutation denials. Credit and debit requests change wallet balances and create
-ledger entries; run them only against a disposable development database.
-
-### Health check
-
-- **Method:** `GET`
-- **Path:** `/api/health`
-- **Authentication:** Not required
-- **Purpose:** Confirms that the Express API is running.
-- **Response (200):**
-
-```json
-{
-  "success": true,
-  "service": "veloop-wallet-backend",
-  "status": "ok",
-  "timestamp": "2026-11-01T00:00:00.000Z"
-}
-```
-
-- **Method:** `GET`
-- **Path:** `/api/ready`
-- **Authentication:** Not required.
-- **Purpose:** Reports whether the API can currently reach MongoDB. This is the
-  deployment readiness probe; `/api/health` remains a database-independent
-  liveness check.
-- **Response (200):**
-  `{ "success": true, "service": "veloop-wallet-backend", "status": "ready", "timestamp": "..." }`.
-- **Response (503):**
-  `{ "success": false, "service": "veloop-wallet-backend", "status": "unavailable", "timestamp": "..." }`.
-
-## Testing and deployment notes
-
-Run unit and HTTP tests from `backend/` with `npm test`; build the production
-frontend from `frontend/` with `npm run build`. Database integration tests
-are opt-in and must use separate disposable MongoDB replica-set databases.
-They cover wallet transaction safety, concurrent debits, withdrawal
-idempotency, rejected-withdrawal reversals, payout configuration, and account
-isolation. Never aim an integration test or demo seed at production data.
-
-The deployment instructions in `README.md` cover the recommended Vercel
-frontend, Render backend, and MongoDB Atlas setup. Use only a dedicated
-demonstration database with a replica set; wallet transactions require
-transaction support. The demo UPI configuration is reference data that
-requires manual review; no payment processor is connected. Deploy behind
-HTTPS and keep database access restricted. Public signups start with a zero
-balance; the demo seed is restricted to development/test databases and does
-not transfer to a separate deployment. Withdrawal review is available only
-through protected admin/internal API endpoints; there is no reviewer UI or
-payment transfer integration. Use one API instance with the built-in
-per-process rate-limit store, or configure a shared store before scaling out.
+Never point an integration test or seed at production data.
