@@ -59,8 +59,9 @@ sequenceDiagram
     API->>DB: Transaction: withdrawal + wallet debit + ledger + audit
     DB-->>API: Commit
     API-->>UI: 201 withdrawal (or 200 idempotent replay)
-    Note over API,DB: Review approval changes status; it does not transfer funds.
 ```
+
+Review approval changes the request status only; it does not transfer funds.
 
 ## Repository map
 
